@@ -1,0 +1,14 @@
+# zig language ignores
+.zig-cache/
+zig-out/
+build/
+build-*/
+docgen_tmp/
+*.o
+
+# rust language ignores
+debug
+target
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
