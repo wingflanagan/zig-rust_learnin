@@ -1232,3 +1232,308 @@ You’re not “learning Zig and Rust.”
 You’re **calibrating your bullshit detector** against two very honest languages.
 
 That’s time well spent.
+
+You’re basically asking for a **systems-programming dojo**, not a tutorial playlist. Good. Tutorials lie. Projects confess.
+
+Below is a **one-month, no-magic, high-ROI curriculum** that assumes:
+
+* you already know how computers work
+* you distrust abstraction fairy dust
+* you want transferable understanding, not vibes
+* everything is **free**
+* Zig first, Rust second, same problem each time
+
+I’ll give you:
+
+1. what to read/watch
+2. what Unix utility to build
+3. how to do it in **Zig**, then **Rust**
+4. what you should *notice* and *extract* as lessons
+
+No fluff. No “idiomatic excellence awards.” Just useful pain.
+
+---
+
+# OVERALL STRUCTURE (IMPORTANT)
+
+Each week:
+
+* **Zig first**: design + mechanics
+* **Rust second**: verification + constraint
+* Same spec, same tests, same inputs
+* No async yet. No heroics.
+
+Your output every week:
+
+* working binaries on **Linux + Windows**
+* a short notes file answering:
+
+  * What stayed identical?
+  * What diverged?
+  * What did the language force me to think about?
+
+That reflection is non-optional. That’s where the learning is.
+
+---
+
+# WEEK 1 – FILE I/O, BUFFERS, REALITY
+
+## Reading / Watching (lightweight, don’t binge)
+
+### Zig
+
+* Zig documentation: *Getting Started* + *Basics*
+* Focus on:
+
+  * slices
+  * allocators
+  * error handling (`try`, `catch`)
+  * `std.io`
+
+Zig docs are refreshingly non-theatrical. Read them like a reference, not scripture.
+
+### Rust
+
+* The Rust Book:
+
+  * Chapters 1–4 (stop after ownership)
+  * Skim, don’t memorize
+* Rust by Example:
+
+  * std::io
+  * error handling
+  * structs/enums
+
+---
+
+## Utility: `cat`
+
+Yes, `cat`. Don’t roll your eyes. This is where lies go to die.
+
+### Zig version
+
+Goals:
+
+* read stdin → write stdout
+* fixed-size buffer (8K or 16K)
+* zero per-line allocation
+* explicit error handling
+
+Focus on:
+
+* how buffering actually works
+* allocator choice (stack vs heap)
+* what happens on EOF
+* Windows console quirks immediately show up here
+
+### Rust version
+
+Rules:
+
+* use `Vec<u8>`
+* use `Read` / `Write`
+* avoid fancy iterators
+* clone if it keeps you moving
+
+Focus on:
+
+* ownership of the buffer
+* mutable borrowing vs passing ownership
+* how much ceremony Rust requires just to do I/O
+
+### Takeaways to extract
+
+* How explicit Zig feels vs Rust’s guardrails
+* Where Rust *forces* structure
+* How similar the generated binaries actually are
+* How Windows behaves differently with stdin/stdout
+
+---
+
+# WEEK 2 – COUNTING, TEXT, ENCODING LIES
+
+## Utility: `wc`
+
+Now things get interesting.
+
+### Zig version
+
+Start with:
+
+* bytes
+* lines (`\n`)
+* words (simple whitespace split)
+
+Then ask yourself:
+
+* do I treat input as bytes or UTF-8?
+* what’s my *policy*?
+
+Zig will happily let you ignore Unicode. That’s power and danger.
+
+### Rust version
+
+Same functionality.
+Rules:
+
+* don’t get fancy
+* `String` is allowed
+* Unicode correctness optional, but *notice* it
+
+Rust’s stdlib nudges you toward Unicode-aware handling whether you like it or not.
+
+### Takeaways
+
+* Text processing is never “just text”
+* Zig lets you define reality
+* Rust makes you acknowledge it
+* Cross-platform text handling is harder than people admit
+
+---
+
+# WEEK 3 – STATE, BUFFERS, DESIGN PRESSURE
+
+## Utility: `head` and `tail`
+
+Do **both**. They teach different things.
+
+### `head`
+
+Simple, but:
+
+* streaming matters
+* stop early
+* don’t over-read
+
+### `tail`
+
+This is the real lesson.
+
+* ring buffers
+* bounded memory
+* file vs stdin differences
+
+### Zig version
+
+You will:
+
+* design your own ring buffer
+* manage memory explicitly
+* decide when to allocate
+
+Zig will feel *honest* here.
+
+### Rust version
+
+You will:
+
+* wrestle with ownership in the buffer
+* decide between copying vs borrowing
+* learn where `VecDeque` helps and where it doesn’t
+
+Rust will start interrogating your design.
+
+### Takeaways
+
+* This is where Rust starts paying rent
+* You’ll discover bugs *before* running the program
+* Zig lets you move fast but requires discipline
+* Same algorithm, different mental load
+
+---
+
+# WEEK 4 – SEARCH, SCALE, CONTROLLED CONCURRENCY
+
+## Utility: `grep` (basic, then parallel)
+
+This is the capstone for month one.
+
+### Phase 1: single-threaded
+
+* naive substring search
+* streaming input
+* large files
+* no regex at first
+
+### Phase 2: parallel files
+
+* directory walk
+* worker pool
+* bounded concurrency
+* serialized output
+
+### Zig version
+
+Focus on:
+
+* thread pool
+* shared queues or work stealing
+* explicit synchronization
+* allocator reuse
+
+Zig will make you confront:
+
+* race conditions
+* lifetime discipline
+* OS differences immediately
+
+### Rust version
+
+Focus on:
+
+* `Arc`, channels, ownership boundaries
+* compiler-enforced thread safety
+* restructuring code to satisfy `Send`/`Sync`
+
+Rust will make unsafe designs *annoying*, which is the point.
+
+### Takeaways
+
+* Why “threads it can handle” is a dumb benchmark
+* How backpressure actually matters
+* Where Rust saves you from yourself
+* Where Zig lets you squeeze performance harder
+
+---
+
+# WHAT YOU SHOULD KNOW AFTER MONTH ONE
+
+If you do this properly, after four weeks you should be able to say:
+
+* “I know exactly what each language does *not* do for me.”
+* “I know where Windows diverges from Unix in practice.”
+* “I know how much abstraction I can tolerate.”
+* “I know which bugs Rust prevents that Zig allows.”
+* “I know which costs Zig makes explicit that Rust hides.”
+
+That’s not beginner knowledge. That’s systems fluency.
+
+---
+
+# WHAT YOU SHOULD *NOT* DO YET
+
+* No async runtimes
+* No regex engines
+* No clever iterator gymnastics
+* No chasing ‘idiomatic’ purity
+* No benchmarking without real workloads
+
+Those are second-month problems.
+
+---
+
+## Final assessment
+
+This curriculum has a **very high payoff-to-effort ratio** because:
+
+* every project is small
+* every project is real
+* every lesson transfers
+* no trust is placed in magic
+* no time is wasted on tutorial cosplay
+
+You’re not “learning Zig and Rust.”
+
+You’re **calibrating your bullshit detector** against two very honest languages.
+
+That’s time well spent.
