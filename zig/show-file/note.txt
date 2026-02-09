@@ -1,0 +1,771 @@
+Interesting. I was adapting an example in the Zig book, and I ended up using a fully qualified path (which worked, of course). What would have been a better way to do that?
+
+
+### You
+
+zig: how do I get command-line parameters?
+
+### ChatGPT
+
+You’d think a systems language would make this mysterious and painful, but no, Zig actually behaves like a grown-up here.
+
+### The normal way (aka “please don’t leak memory”)
+
+In Zig, command-line arguments come from `std.process.argsAlloc`. You allocate them, use them, then free them. Yes, even arguments. Welcome to responsibility.
+
+
+```zig
+const std = @import("std");
+
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    // args[0] is the program name, because of course it is
+    for (args, 0..) |arg, i| {
+        std.debug.print("arg[{d}]: {s}\n", .{ i, arg });
+    }
+}
+```
+
+Run it like:
+
+
+```sh
+zig run main.zig -- one two three
+```
+
+Output:
+
+
+```less
+arg[0]: ./main
+arg[1]: one
+arg[2]: two
+arg[3]: three
+```
+
+Nothing fancy. No magic globals. No spooky action at a distance. Zig hands you the argv list and expects you to behave like an adult.
+
+* * *
+
+### If you only want an iterator (lighter-weight)
+
+If you don’t want to allocate an array up front, Zig also gives you an iterator:
+
+
+```zig
+const std = @import("std");
+
+pub fn main() !void {
+    var it = std.process.args();
+    var i: usize = 0;
+
+    while (it.next()) |arg| {
+        std.debug.print("arg[{d}]: {s}\n", .{ i, arg });
+        i += 1;
+    }
+}
+```
+
+This is nice for simple tools where you just want to scan arguments once and move on with your life.
+
+* * *
+
+### A couple of Zig-isms to keep straight
+
+-   `args[0]` is always the program name. Zig did not reinvent reality.
+    
+-   `argsAlloc` returns `[][:0]u8` (null-terminated slices), because C exists and Zig refuses to pretend it doesn’t.
+    
+-   You **must** free what you allocate. Zig will not mommy you.
+    
+-   There is no built-in flag parser. Zig assumes you are either:
+    
+    1.  Writing your own (common, sane, educational), or
+        
+    2.  Pulling in a small library, or
+        
+    3.  Enjoying pain
+        
+
+For Unix-utility reimplementation projects, this explicitness is actually a feature. You see exactly what’s happening, no hidden argparse goblins.
+
+If you want, next step is rolling a dead-simple `-h / --help / positional args` parser in ~40 lines, which is very Zig and mildly smug.
+
+### You
+
+Well, since I am re-creating the Unix utilities in Zig (and Rust), then perhaps I should take the time to learn how to do this "right" from the beginning. I'm imagining a "lib" folder or something in my source tree, with a command line parser lib I can link in to my versions of the various utils. I don't see anyu downside, since it's a basic building block and learning to make those is pretty fundamental.
+
+### ChatGPT
+
+You’re not wrong. Building your own tiny CLI parsing lib is exactly the sort of “basic building block” that pays off when you’re cloning Unix utils. Also it’s one of the few places where reinventing the wheel is actually educational instead of just… tragic.
+
+Here’s a sane way to do it “right” without turning your repo into a framework that needs a framework.
+
+## What “right” looks like for Unix utils
+
+Unix utilities mostly need:
+
+-   **Short flags**: `-a -l -h` and **bundles** like `-alh`
+    
+-   **Long flags**: `--all --help`
+    
+-   **Flags with values**:
+    
+    -   `-o FILE`
+        
+    -   `--output FILE`
+        
+    -   `--output=FILE`
+        
+-   **Positional args**: paths, patterns, etc.
+    
+-   **End of options**: `--` meaning “everything after this is positional”
+    
+-   **Good error handling**: unknown flag, missing value, etc.
+    
+-   **Consistent help output** (optional but nice)
+    
+
+That’s it. Don’t build clap. Don’t build argparse. Build a small, sharp knife.
+
+## Repo layout I’d recommend
+
+Because yes, you’ll reuse this across `ls`, `cat`, `grep`, etc.
+
+
+```css
+winnux/
+  build.zig
+  src/
+    lib/
+      cli.zig
+    utils/
+      ls.zig
+      cat.zig
+      grep.zig
+```
+
+-   `src/lib/cli.zig`: your reusable parser
+    
+-   each utility imports it via `@import("lib/cli.zig")` (or a module mapping in `build.zig`, if you want to be extra proper)
+    
+
+## Design: “spec-driven” parsing
+
+You want a parser that takes a *spec* describing options, then produces a result struct.
+
+### Core types
+
+-   `OptionSpec` (name(s), does it take a value, help text)
+    
+-   `ParseResult` (flags set + option values + positional args)
+    
+-   `ParseError` (unknown option, missing value, etc.)
+    
+
+And crucially: **don’t allocate unless you have to**.
+
+-   For Unix utils, you can often store:
+    
+    -   boolean flags
+        
+    -   slices pointing into the original arg strings for values
+        
+    -   positional args as slices too  
+        So your parse result can borrow memory from `argsAlloc` output.
+        
+
+## Minimal but solid implementation (Zig)
+
+This is a real starting point you can drop into `src/lib/cli.zig`.
+
+
+```zig
+const std = @import("std");
+
+pub const ParseError = error{
+    UnknownOption,
+    MissingValue,
+};
+
+pub const OptionKind = enum {
+    flag,      // no value
+    value,     // requires value
+};
+
+pub const OptionSpec = struct {
+    short: ?u8 = null,          // e.g. 'a' for -a
+    long: ?[]const u8 = null,   // e.g. "all" for --all
+    kind: OptionKind = .flag,
+};
+
+pub const Parsed = struct {
+    // Store what you need. Keep it generic but usable.
+    // For flags: set of seen short/long names
+    // For values: map long->value, short->value
+    // For positionals: list
+
+    allocator: std.mem.Allocator,
+
+    // For simplicity: store options encountered as strings and optional values.
+    // You can later specialize per util.
+    items: std.ArrayList(Item),
+    positionals: std.ArrayList([]const u8),
+
+    pub const Item = struct {
+        name: []const u8,          // "-a" or "--all" normalized however you want
+        value: ?[]const u8 = null, // points into argv strings
+    };
+
+    pub fn deinit(self: *Parsed) void {
+        self.items.deinit();
+        self.positionals.deinit();
+    }
+
+    pub fn has(self: *const Parsed, name: []const u8) bool {
+        for (self.items.items) |it| {
+            if (std.mem.eql(u8, it.name, name) and it.value == null) return true;
+        }
+        return false;
+    }
+
+    pub fn get(self: *const Parsed, name: []const u8) ?[]const u8 {
+        for (self.items.items) |it| {
+            if (std.mem.eql(u8, it.name, name)) return it.value;
+        }
+        return null;
+    }
+};
+
+fn matchSpec(specs: []const OptionSpec, token: []const u8) ?OptionSpec {
+    // token is like "-a" or "--all"
+    if (std.mem.startsWith(u8, token, "--")) {
+        const key = token[2..];
+        for (specs) |s| {
+            if (s.long) |lname| {
+                if (std.mem.eql(u8, key, lname)) return s;
+            }
+        }
+    } else if (std.mem.startsWith(u8, token, "-") and token.len == 2) {
+        const ch = token[1];
+        for (specs) |s| {
+            if (s.short) |sh| {
+                if (ch == sh) return s;
+            }
+        }
+    }
+    return null;
+}
+
+pub fn parse(
+    allocator: std.mem.Allocator,
+    specs: []const OptionSpec,
+    argv: []const []const u8,
+) ParseError!Parsed {
+    var out = Parsed{
+        .allocator = allocator,
+        .items = std.ArrayList(Parsed.Item).init(allocator),
+        .positionals = std.ArrayList([]const u8).init(allocator),
+    };
+
+    var i: usize = 1; // skip argv[0]
+    var stop_options = false;
+
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+
+        if (!stop_options and std.mem.eql(u8, arg, "--")) {
+            stop_options = true;
+            continue;
+        }
+
+        if (!stop_options and std.mem.startsWith(u8, arg, "--")) {
+            // long option, maybe --key=value
+            const eq = std.mem.indexOfScalar(u8, arg, '=');
+            if (eq) |pos| {
+                const name = arg[0..pos];
+                const value = arg[pos + 1 ..];
+                const spec = matchSpec(specs, name) orelse return error.UnknownOption;
+                if (spec.kind != .value) return error.UnknownOption;
+
+                try out.items.append(.{ .name = name, .value = value });
+            } else {
+                const spec = matchSpec(specs, arg) orelse return error.UnknownOption;
+                if (spec.kind == .flag) {
+                    try out.items.append(.{ .name = arg, .value = null });
+                } else {
+                    // needs value: next argv
+                    if (i + 1 >= argv.len) return error.MissingValue;
+                    i += 1;
+                    try out.items.append(.{ .name = arg, .value = argv[i] });
+                }
+            }
+            continue;
+        }
+
+        if (!stop_options and std.mem.startsWith(u8, arg, "-") and arg.len > 1) {
+            // short options, potentially bundled: -alh or -oFILE?
+            if (arg.len == 2) {
+                // single -x
+                const spec = matchSpec(specs, arg) orelse return error.UnknownOption;
+                if (spec.kind == .flag) {
+                    try out.items.append(.{ .name = arg, .value = null });
+                } else {
+                    if (i + 1 >= argv.len) return error.MissingValue;
+                    i += 1;
+                    try out.items.append(.{ .name = arg, .value = argv[i] });
+                }
+            } else {
+                // bundle: -abc or -oFILE
+                // Walk each letter; if one needs a value, consume rest or next argv.
+                var j: usize = 1;
+                while (j < arg.len) : (j += 1) {
+                    const token = [_]u8{ '-', arg[j] };
+                    const opt = token[0..2];
+                    const spec = matchSpec(specs, opt) orelse return error.UnknownOption;
+
+                    if (spec.kind == .flag) {
+                        try out.items.append(.{ .name = opt, .value = null });
+                        continue;
+                    }
+
+                    // value option: remainder is the value if present, else next argv
+                    if (j + 1 < arg.len) {
+                        const value = arg[j + 1 ..];
+                        try out.items.append(.{ .name = opt, .value = value });
+                    } else {
+                        if (i + 1 >= argv.len) return error.MissingValue;
+                        i += 1;
+                        try out.items.append(.{ .name = opt, .value = argv[i] });
+                    }
+                    break; // value option ends the bundle
+                }
+            }
+            continue;
+        }
+
+        // positional
+        try out.positionals.append(arg);
+    }
+
+    return out;
+}
+```
+
+### Example usage in a utility
+
+`src/utils/ls.zig`:
+
+
+```zig
+const std = @import("std");
+const cli = @import("../lib/cli.zig");
+
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+
+    const specs = [_]cli.OptionSpec{
+        .{ .short = 'a', .long = "all", .kind = .flag },
+        .{ .short = 'l', .long = "long", .kind = .flag },
+        .{ .short = 'o', .long = "output", .kind = .value },
+    };
+
+    var parsed = try cli.parse(allocator, &specs, argv);
+    defer parsed.deinit();
+
+    const show_all = parsed.has("-a") or parsed.has("--all");
+    const long_fmt = parsed.has("-l") or parsed.has("--long");
+    const output = parsed.get("-o") orelse parsed.get("--output");
+
+    std.debug.print("show_all={any} long={any} output={s}\n", .{
+        show_all,
+        long_fmt,
+        output orelse "(none)",
+    });
+
+    for (parsed.positionals.items) |p| {
+        std.debug.print("positional: {s}\n", .{p});
+    }
+}
+```
+
+## Why this is a good “foundation”
+
+-   **Supports real Unix syntax** (`-al`, `--flag`, `--k=v`, `--`, etc.)
+    
+-   **Value storage is borrowed** (no string copies)
+    
+-   **Reusable across commands**
+    
+-   Easy to evolve:
+    
+    -   add “required/optional” enforcement
+        
+    -   add `--help` generator
+        
+    -   add typed getters (`getInt`, `getEnum`, etc.)
+        
+    -   add repeated options (`-I pattern` multiple times)
+        
+
+## The “don’t screw yourself later” rule
+
+Keep your lib *small and boring*. The moment you add subcommands, auto-completion, config files, and “declarative help themes”, you’ve built a second job.
+
+This setup is enough to build:
+
+-   `cat` / `head` / `tail`
+    
+-   `ls`
+    
+-   `mkdir` / `rm`
+    
+-   `grep` (and its 57 flags from hell)
+    
+-   `wc`
+    
+
+And when you do the Rust versions, you’ll appreciate how much architecture transfers over even if the syntax doesn’t.
+
+If you want the next step that actually matters: a tiny helper that turns `ParseError` into human-friendly messages like:
+
+-   `ls: unknown option --florp`
+    
+-   `grep: option -e requires an argument`
+    
+
+Because “good CLI behavior” is half the reason Unix tools feel clean.
+
+### You
+
+What is std.fs.cwd()? I know std is tandard lib, and fs stands for "file system" (if it doesn't, I'll eat my shorts). But cwd? And why is it a function call? It's chained with another function call to openFile().
+
+### ChatGPT
+
+Yes, fs is filesystem. You may keep your shorts on.  
+Now for **cwd**, which is one of those things that feels obvious five minutes after you learn it and irritating for exactly those first five minutes.
+
+### What `cwd` means
+
+`cwd` = **current working directory**.
+
+As in: the directory your process is *currently running in*.  
+Not the directory where the executable lives. Not your home directory. The one the shell decided you were in when you launched the program, possibly changed by `cd` or by a parent process doing something sneaky.
+
+Same concept as:
+
+-   POSIX `.`
+    
+-   C’s `getcwd()`
+    
+-   `pwd` in the shell
+    
+
+Zig just refuses to pretend this is a global string lying around somewhere.
+
+* * *
+
+### Why `std.fs.cwd()` is a function
+
+Because Zig is allergic to hidden global state.
+
+`std.fs.cwd()` returns a **`Dir` handle**, not a path string. That distinction matters.
+
+
+```zig
+const cwd_dir = std.fs.cwd();
+```
+
+`cwd_dir` is of type:
+
+
+```zig
+std.fs.Dir
+```
+
+This is basically an object representing “the directory the process considers current” with methods attached to it.
+
+So when you see:
+
+
+```zig
+const file = try std.fs.cwd().openFile("foo.txt", .{});
+```
+
+What’s really happening is:
+
+1.  Ask the OS: “Give me a handle to the current working directory”
+    
+2.  Call `openFile()` *relative to that directory*
+    
+3.  Get a file handle
+    
+
+That’s why it’s chained. It’s not a cute trick. It’s explicit scope.
+
+* * *
+
+### Why Zig does it this way (and why it’s actually good)
+
+In Zig, **paths are relative to a directory handle**, not implicitly relative to some ambient mystery directory.
+
+This is a huge deal for:
+
+-   sandboxing
+    
+-   security
+    
+-   testability
+    
+-   avoiding “oops I opened the wrong file” bugs
+    
+
+You can just as easily do:
+
+
+```zig
+const dir = try std.fs.openDirAbsolute("/etc", .{});
+const passwd = try dir.openFile("passwd", .{});
+```
+
+Same API. No stringly-typed nonsense like `"/etc/passwd"` scattered everywhere.
+
+So:
+
+
+```zig
+std.fs.cwd().openFile("foo.txt", .{})
+```
+
+means:
+
+> Open `foo.txt` relative to the process’s current working directory
+
+* * *
+
+### Why it’s not a global
+
+Because Zig does not do:
+
+-   implicit globals
+    
+-   magic singletons
+    
+-   “trust me bro” APIs
+    
+
+If the C version were honest, it would look more like this too.
+
+* * *
+
+### Mental model you want to lock in
+
+Think of `std.fs.cwd()` as:
+
+> “Give me a handle to *where I am right now*, so I can do filesystem things relative to it.”
+
+Not:
+
+-   a string
+    
+-   a path
+    
+-   a constant
+    
+
+A **capability**.
+
+Once that clicks, a lot of Zig’s filesystem API suddenly stops feeling hostile and starts feeling… annoyingly correct.
+
+If you want, next we can unpack `openDir`, `openDirAbsolute`, and why Zig makes you say `.{}`  
+every time like it’s judging your commitment.
+
+### You
+
+Interesting. I was adapting an example in the Zig book, and I ended up using a fully qualified path (which worked, of course). What would have been a better way to do that?
+
+### ChatGPT
+
+You didn’t do anything *wrong*. Using a fully-qualified path works, the OS is happy, the file opens, everyone goes home.  
+But Zig is nudging you toward a cleaner, more explicit pattern that scales better than “just jam an absolute path in there and pray”.
+
+So here’s the grown-up version of what you were doing, and why it’s better.
+
+* * *
+
+## The *least* interesting option (what you did)
+
+
+```zig
+const file = try std.fs.cwd().openFile(
+    "/home/wing/data/input.txt",
+    .{}
+);
+```
+
+This works because:
+
+-   absolute paths ignore the cwd anyway
+    
+-   the OS resolves it directly
+    
+
+Downsides:
+
+-   hard-coded paths are brittle
+    
+-   impossible to reuse in tests
+    
+-   annoying on Windows
+    
+-   you lose Zig’s directory-handle advantages
+    
+
+* * *
+
+## Better: open a directory, then work *relative to it*
+
+If you conceptually mean “work inside this directory”, say that.
+
+
+```zig
+const std = @import("std");
+
+pub fn main() !void {
+    const dir = try std.fs.openDirAbsolute(
+        "/home/wing/data",
+        .{}
+    );
+    defer dir.close();
+
+    const file = try dir.openFile("input.txt", .{});
+    defer file.close();
+}
+```
+
+Now you’ve told Zig:
+
+> “This program operates *inside this directory*.”
+
+That’s clearer, safer, and more reusable.
+
+* * *
+
+## Even better: derive paths instead of hard-coding them
+
+Most real tools want something like:
+
+-   cwd
+    
+-   plus a subdirectory
+    
+-   plus a filename
+    
+
+
+```zig
+const cwd = std.fs.cwd();
+const dir = try cwd.openDir("data", .{});
+defer dir.close();
+
+const file = try dir.openFile("input.txt", .{});
+```
+
+Now the program works if the user runs it from anywhere sensible.
+
+* * *
+
+## The “Unix utility” way (what you *should* aim for)
+
+Let the **user** decide the path.
+
+
+```zig
+const argv = try std.process.argsAlloc(allocator);
+defer std.process.argsFree(allocator, argv);
+
+if (argv.len < 2) return error.MissingPath;
+
+const path = argv[1];
+const file = try std.fs.cwd().openFile(path, .{});
+```
+
+This mirrors how real Unix tools behave:
+
+-   paths are relative to cwd by default
+    
+-   absolute paths still work
+    
+-   no assumptions baked into the binary
+    
+
+* * *
+
+## When absolute paths *are* the right choice
+
+Use them when:
+
+-   accessing system resources (`/etc`, `/proc`, `/sys`)
+    
+-   building admin tools
+    
+-   writing installers
+    
+-   deliberately escaping cwd constraints
+    
+
+And in those cases, **still prefer**:
+
+
+```zig
+const dir = try std.fs.openDirAbsolute("/etc", .{});
+```
+
+instead of sprinkling absolute paths everywhere.
+
+* * *
+
+## The core Zig idea to internalize
+
+Zig wants you to think in terms of **capabilities**, not strings.
+
+Bad mental model:
+
+> “I have a path string; I open files with it.”
+
+Zig mental model:
+
+> “I have access to *this directory*; everything I do is relative to it.”
+
+That’s why:
+
+-   `cwd()` returns a `Dir`
+    
+-   `openFile()` lives on `Dir`
+    
+-   paths don’t float around detached from context
+    
+
+* * *
+
+## Rule of thumb you can keep
+
+-   **One file** → `cwd().openFile(path)`
+    
+-   **Many files in a directory** → `openDir` once, then work inside it
+    
+-   **Reusable / testable code** → accept a `Dir` as a parameter
+    
+-   **System stuff** → `openDirAbsolute`
+    
+
+You’re already thinking about this the right way, which is mildly annoying because it means Zig is doing its job.
+
+Next useful rabbit hole, if you want it:  
+Why passing `std.fs.Dir` into functions is one of Zig’s most underrated superpowers.
